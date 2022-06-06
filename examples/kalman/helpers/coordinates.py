@@ -5,6 +5,7 @@ with each row as a position.
 """
 
 
+
 a = 6378137
 b = 6356752.3142
 esq = 6.69437999014 * 0.001
@@ -64,7 +65,7 @@ def ecef2geodetic(ecef, radians=False):
   geodetic = np.column_stack((lat, lon, h))
   return geodetic.reshape(input_shape)
 
-class LocalCoord:
+class LocalCoord():
   """
    Allows conversions to local frames. In this case NED.
    That is: North East Down from the start position in
@@ -87,6 +88,7 @@ class LocalCoord:
   def from_ecef(cls, init_ecef):
     init_geodetic = ecef2geodetic(init_ecef)
     return LocalCoord(init_geodetic, init_ecef)
+
 
   def ecef2ned(self, ecef):
     ecef = np.array(ecef)

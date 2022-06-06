@@ -1,19 +1,17 @@
-from typing import Dict, List, Union
-
 import scipy.optimize as opt
 import numpy as np
 import datetime
-import struct
-
 from . import constants
 from .lib.coordinates import LocalCoord
 from .gps_time import GPSTime
-from .helpers import ConstellationId, get_constellation_and_sv_id, get_nmea_id_from_constellation_and_svid, \
-  rinex3_obs_from_rinex2_obs
+from .helpers import rinex3_obs_from_rinex2_obs, \
+                    get_nmea_id_from_prn, \
+                    get_prn_from_nmea_id, \
+                    get_constellation
 
 
 def array_from_normal_meas(meas):
-  return np.concatenate(([meas.get_nmea_id()],
+  return np.concatenate(([get_nmea_id_from_prn(meas.prn)],
                          [meas.recv_time_week],
                          [meas.recv_time_sec],
                          [meas.glonass_freq],
@@ -33,8 +31,7 @@ def normal_meas_from_array(arr):
   observables_std['D1C'] = arr[7]
   observables['S1C'] = arr[8]
   observables['L1C'] = arr[9]
-  constellation_id, sv_id = get_constellation_and_sv_id(nmea_id=arr[0])
-  return GNSSMeasurement(constellation_id, sv_id, arr[1], arr[2],
+  return GNSSMeasurement(get_prn_from_nmea_id(arr[0]), arr[1], arr[2],
                          observables, observables_std, arr[3])
 
 
@@ -52,14 +49,11 @@ class GNSSMeasurement:
   SAT_POS = slice(8, 11)
   SAT_VEL = slice(11, 14)
 
-  def __init__(self, constellation_id: ConstellationId, sv_id: int, recv_time_week: int, recv_time_sec: float, observables: Dict[str, float], observables_std: Dict[str, float],
-               glonass_freq: Union[int, float] = None):
-    # Metadata
-    # prn: unique satellite id
-    self.prn = "%s%02d" % (constellation_id.to_rinex_char(), sv_id)  # satellite ID in rinex convention
-    self.constellation_id = constellation_id
-    self.sv_id = sv_id  # satellite id per constellation
+  def __init__(self, prn, recv_time_week, recv_time_sec,
+               observables, observables_std, glonass_freq=np.nan):
 
+    # Metadata
+    self.prn = prn  # satellite ID in rinex convention
     self.recv_time_week = recv_time_week
     self.recv_time_sec = recv_time_sec
     self.recv_time = GPSTime(recv_time_week, recv_time_sec)
@@ -79,7 +73,7 @@ class GNSSMeasurement:
     self.sat_clock_err = np.nan
 
     self.sat_pos_final = np.nan * np.ones(3)  # sat_pos in receiver time's ECEF frame instead of satellite time's ECEF frame
-    self.observables_final: Dict[str, float] = {}
+    self.observables_final = {}
 
   def process(self, dog):
     sat_time = self.recv_time - self.observables['C1C']/constants.SPEED_OF_LIGHT
@@ -108,10 +102,10 @@ class GNSSMeasurement:
                                        (constants.GPS_L1**2 - constants.GPS_L2**2))
 
     geometric_range = np.linalg.norm(self.sat_pos - est_pos)
-    theta_1 = constants.EARTH_ROTATION_RATE * geometric_range / constants.SPEED_OF_LIGHT
-    self.sat_pos_final = np.array([self.sat_pos[0] * np.cos(theta_1) + self.sat_pos[1] * np.sin(theta_1),
-                                   self.sat_pos[1] * np.cos(theta_1) - self.sat_pos[0] * np.sin(theta_1),
-                                   self.sat_pos[2]])
+    theta_1 = constants.EARTH_ROTATION_RATE*(geometric_range)/constants.SPEED_OF_LIGHT
+    self.sat_pos_final = [self.sat_pos[0]*np.cos(theta_1) + self.sat_pos[1]*np.sin(theta_1),
+                          self.sat_pos[1]*np.cos(theta_1) - self.sat_pos[0]*np.sin(theta_1),
+                          self.sat_pos[2]]
     if 'C1C' in self.observables_final and np.isfinite(self.observables_final['C1C']):
       self.corrected = True
       return True
@@ -120,20 +114,14 @@ class GNSSMeasurement:
   def as_array(self):
     if not self.corrected:
       raise NotImplementedError('Only corrected measurements can be put into arrays')
-    ret = np.array([self.get_nmea_id(), self.recv_time_week, self.recv_time_sec, self.glonass_freq,
+    ret = np.array([get_nmea_id_from_prn(self.prn), self.recv_time_week, self.recv_time_sec, self.glonass_freq,
                   self.observables_final['C1C'], self.observables_std['C1C'],
                   self.observables_final['D1C'], self.observables_std['D1C']])
-    return np.concatenate((ret, self.sat_pos_final, self.sat_vel))
-
-  def __repr__(self):
-    time = self.recv_time.as_datetime().strftime('%Y-%m-%dT%H:%M:%S.%f')
-    return f"<GNSSMeasurement from {self.prn} at {time}>"
-
-  def get_nmea_id(self):
-    return get_nmea_id_from_constellation_and_svid(self.constellation_id, self.sv_id)
+    ret = np.concatenate((ret, self.sat_pos_final, self.sat_vel))
+    return ret
 
 
-def process_measurements(measurements: List[GNSSMeasurement], dog) -> List[GNSSMeasurement]:
+def process_measurements(measurements, dog=None):
   proc_measurements = []
   for meas in measurements:
     if meas.process(dog):
@@ -141,7 +129,7 @@ def process_measurements(measurements: List[GNSSMeasurement], dog) -> List[GNSSM
   return proc_measurements
 
 
-def correct_measurements(measurements: List[GNSSMeasurement], est_pos, dog) -> List[GNSSMeasurement]:
+def correct_measurements(measurements, est_pos, dog=None):
   corrected_measurements = []
   for meas in measurements:
     if meas.correct(est_pos, dog):
@@ -167,122 +155,96 @@ def group_measurements_by_sat(measurements):
 
 
 def read_raw_qcom(report):
-  dr = 'DrMeasurementReport' in str(report.schema)
-  # Only gps/sbas and glonass are supported
-  constellation_id = ConstellationId.from_qcom_source(report.source)
-  if constellation_id in [ConstellationId.GPS, ConstellationId.SBAS]:  # gps/sbas
-    if dr:
-      recv_tow = report.gpsMilliseconds / 1000.0  # seconds
-      time_bias_ms = struct.unpack("f", struct.pack("I", report.gpsTimeBiasMs))[0]
-    else:
-      recv_tow = report.milliseconds / 1000.0  # seconds
-      time_bias_ms = report.timeBias
-    recv_time = GPSTime(report.gpsWeek, recv_tow)
-  elif constellation_id == ConstellationId.GLONASS:
-    if dr:
-      recv_tow = report.glonassMilliseconds / 1000.0  # seconds
-      recv_time = GPSTime.from_glonass(report.glonassYear, report.glonassDay, recv_tow)
-      time_bias_ms = report.glonassTimeBias
-    else:
-      recv_tow = report.milliseconds / 1000.0  # seconds
-      recv_time = GPSTime.from_glonass(report.glonassCycleNumber, report.glonassNumberOfDays, recv_tow)
-      time_bias_ms = report.timeBias
-  else:
-    raise NotImplementedError('Only GPS (0), SBAS (1) and GLONASS (6) are supported from qcom, not:', {report.source})
-  #print(recv_time, report.source, time_bias_ms, dr)
+  recv_tow = (report.gpsMilliseconds) * 1.0 / 1000.0  # seconds
+  recv_week = report.gpsWeek
+  recv_time = GPSTime(recv_week, recv_tow)
   measurements = []
   for i in report.sv:
-    nmea_id = i.svId  # todo change svId to nmea_id in cereal message. Or better: change the publisher to publish correct svId's, since constellation id is also given
-    if nmea_id == 255:
-      # todo nmea_id is not valid. Fix publisher
-      continue
-    _, sv_id = get_constellation_and_sv_id(nmea_id)
+    svId = i.svId
     if not i.measurementStatus.measurementNotUsable and i.measurementStatus.satelliteTimeIsKnown:
-      sat_tow = (i.unfilteredMeasurementIntegral + i.unfilteredMeasurementFraction + i.latency + time_bias_ms) / 1000
+      sat_tow = (
+        i.unfilteredMeasurementIntegral + i.unfilteredMeasurementFraction) / 1000
+      sat_time = GPSTime(recv_week, sat_tow)
       observables, observables_std = {}, {}
-      observables['C1C'] = (recv_tow - sat_tow)*constants.SPEED_OF_LIGHT
+      observables['C1C'] = (recv_time - sat_time)*constants.SPEED_OF_LIGHT
       observables_std['C1C'] = i.unfilteredTimeUncertainty * 1e-3 * constants.SPEED_OF_LIGHT
-      if i.measurementStatus.fineOrCoarseVelocity:
-        # about 10x better, perhaps filtered with carrier phase?
-        observables['D1C'] = i.fineSpeed
-        observables_std['D1C'] = i.fineSpeedUncertainty
-      else:
-        observables['D1C'] = i.unfilteredSpeed
-        observables_std['D1C'] = i.unfilteredSpeedUncertainty
-      observables['S1C'] = (i.carrierNoise/100.) if i.carrierNoise != 0 else np.nan
+      observables['D1C'] = i.unfilteredSpeed
+      observables_std['D1C'] = i.unfilteredSpeedUncertainty
+      observables['S1C'] = np.nan
       observables['L1C'] = np.nan
-      #print("  %.5f %3d %10.2f %7.2f %7.2f %.2f %d" % (recv_time.tow, nmea_id,
-      #  observables['C1C'], observables_std['C1C'],
-      #  observables_std['D1C'], observables['S1C'], i.latency), i.observationState, i.measurementStatus.fineOrCoarseVelocity)
-      glonass_freq = (i.glonassFrequencyIndex - 7) if constellation_id == ConstellationId.GLONASS else np.nan
-      measurements.append(GNSSMeasurement(constellation_id, sv_id,
-                                          recv_time.week,
-                                          recv_time.tow,
-                                          observables,
-                                          observables_std,
-                                          glonass_freq))
+      measurements.append(GNSSMeasurement(get_prn_from_nmea_id(svId),
+                                  recv_time.week,
+                                  recv_time.tow,
+                                  observables,
+                                  observables_std))
   return measurements
 
 
-def read_raw_ublox(report) -> List[GNSSMeasurement]:
-  recv_tow = report.rcvTow  # seconds
+def read_raw_ublox(report):
+  recv_tow = (report.rcvTow)  # seconds
   recv_week = report.gpsWeek
+  recv_time = GPSTime(recv_week, recv_tow)
   measurements = []
   for i in report.measurements:
-    # only add Gps and Glonass fixes
-    if i.gnssId in [ConstellationId.GPS, ConstellationId.GLONASS]:
+    # only add gps and glonass fixes
+    if (i.gnssId == 0 or i.gnssId==6):
       if i.svId > 32 or i.pseudorange > 2**32:
         continue
+      if i.gnssId == 0:
+        prn = 'G%02i' % i.svId
+      else:
+        prn = 'R%02i' % i.svId
       observables = {}
       observables_std = {}
-      if i.trackingStatus.pseudorangeValid and i.sigId == 0:
+      if i.trackingStatus.pseudorangeValid and i.sigId==0:
         observables['C1C'] = i.pseudorange
         # Empirically it seems obvious ublox's std is
         # actually a variation
         observables_std['C1C'] = np.sqrt(i.pseudorangeStdev)*10
-        if i.gnssId == ConstellationId.GLONASS:
+        if i.gnssId==6:
           glonass_freq = i.glonassFrequencyIndex - 7
-          observables['D1C'] = -(constants.SPEED_OF_LIGHT / (constants.GLONASS_L1 + glonass_freq * constants.GLONASS_L1_DELTA)) * i.doppler
-        else:  # GPS
+          observables['D1C'] = -(constants.SPEED_OF_LIGHT / (constants.GLONASS_L1 + glonass_freq*constants.GLONASS_L1_DELTA)) * (i.doppler)
+        elif i.gnssId==0:
           glonass_freq = np.nan
-          observables['D1C'] = -(constants.SPEED_OF_LIGHT / constants.GPS_L1) * i.doppler
-        observables_std['D1C'] = (constants.SPEED_OF_LIGHT / constants.GPS_L1) * i.dopplerStdev
+          observables['D1C'] = -(constants.SPEED_OF_LIGHT / constants.GPS_L1) * (i.doppler)
+        observables_std['D1C'] = (constants.SPEED_OF_LIGHT / constants.GPS_L1) * i.dopplerStdev * 1
         observables['S1C'] = i.cno
         if i.trackingStatus.carrierPhaseValid:
           observables['L1C'] = i.carrierCycles
         else:
           observables['L1C'] = np.nan
-
-        measurements.append(GNSSMeasurement(ConstellationId(i.gnssId), i.svId, recv_week, recv_tow,
-                                            observables, observables_std, glonass_freq))
+        measurements.append(GNSSMeasurement(prn,
+                                    recv_time.week,
+                                    recv_time.tow,
+                                    observables,
+                                    observables_std,
+                                    glonass_freq))
   return measurements
 
 
-def read_rinex_obs(obsdata) -> List[List[GNSSMeasurement]]:
-  measurements: List[List[GNSSMeasurement]] = []
-  obsdata_keys = list(obsdata.data.keys())
-  first_sat = obsdata_keys[0]
+def read_rinex_obs(obsdata):
+  measurements = []
+  first_sat = list(obsdata.data.keys())[0]
   n = len(obsdata.data[first_sat]['Epochs'])
-  for i in range(n):
+  for i in range(0, n):
     recv_time_datetime = obsdata.data[first_sat]['Epochs'][i]
     recv_time_datetime = recv_time_datetime.astype(datetime.datetime)
     recv_time = GPSTime.from_datetime(recv_time_datetime)
     measurements.append([])
-    for sat_str in obsdata_keys:
+    for sat_str in list(obsdata.data.keys()):
       if np.isnan(obsdata.data[sat_str]['C1'][i]):
         continue
       observables, observables_std = {}, {}
       for obs in obsdata.data[sat_str]:
         if obs == 'Epochs':
           continue
-        rinex3_obs_key = rinex3_obs_from_rinex2_obs(obs)
-        observables[rinex3_obs_key] = obsdata.data[sat_str][obs][i]
-        observables_std[rinex3_obs_key] = 1.
-
-      constellation_id, sv_id = get_constellation_and_sv_id(int(sat_str))
-      measurements[-1].append(GNSSMeasurement(constellation_id, sv_id,
-                                              recv_time.week, recv_time.tow,
-                                              observables, observables_std))
+        observables[rinex3_obs_from_rinex2_obs(obs)] = obsdata.data[sat_str][obs][i]
+        observables_std[rinex3_obs_from_rinex2_obs(obs)] = 1
+      measurements[-1].append(GNSSMeasurement(get_prn_from_nmea_id(int(sat_str)),
+                              recv_time.week,
+                              recv_time.tow,
+                              observables,
+                              observables_std))
   return measurements
 
 
@@ -296,7 +258,7 @@ def calc_pos_fix(measurements, x0=[0, 0, 0, 0, 0], no_weight=False, signal='C1C'
   '''
   n = len(measurements)
   if n < 6:
-    return []
+      return []
 
   Fx_pos = pr_residual(measurements, signal=signal, no_weight=no_weight, no_nans=True)
   opt_pos = opt.least_squares(Fx_pos, x0).x
@@ -313,14 +275,14 @@ def calc_vel_fix(measurements, est_pos, v0=[0, 0, 0, 0], no_weight=False, signal
   '''
   n = len(measurements)
   if n < 6:
-    return []
+      return []
 
-  Fx_vel = prr_residual(measurements, est_pos, signal=signal, no_weight=no_weight, no_nans=True)
+  Fx_vel = prr_residual(measurements, est_pos, no_weight=no_weight, no_nans=True)
   opt_vel = opt.least_squares(Fx_vel, v0).x
   return opt_vel, Fx_vel(opt_vel, no_weight=True)
 
 
-def pr_residual(measurements: List[GNSSMeasurement], signal='C1C', no_weight=False, no_nans=False):
+def pr_residual(measurements, signal='C1C', no_weight=False, no_nans=False):
   # solve for pos
   def Fx_pos(xxx_todo_changeme, no_weight=no_weight):
     (x, y, z, bc, bg) = xxx_todo_changeme
@@ -350,9 +312,9 @@ def pr_residual(measurements: List[GNSSMeasurement], signal='C1C', no_weight=Fal
           (sat_pos[1] * np.cos(theta) - sat_pos[0] * np.sin(theta) - y) ** 2 +
           (sat_pos[2] - z) ** 2
       )
-      if meas.constellation_id == ConstellationId.GLONASS:
+      if get_constellation(meas.prn) == 'GLONASS':
         rows.append(weight * (val - (pr - bc - bg)))
-      elif meas.constellation_id == ConstellationId.GPS:
+      elif get_constellation(meas.prn) == 'GPS':
         rows.append(weight * (val - (pr - bc)))
     return rows
   return Fx_pos

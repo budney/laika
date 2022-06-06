@@ -5,6 +5,7 @@ import sympy as sp
 from kalman.helpers import KalmanError, ObservationKind
 from kalman.helpers.ekf_sym import EKF_sym, gen_code
 from kalman.helpers.sympy_helpers import (euler_rotate, quat_matrix_r, quat_rotate)
+# from selfdrive.swaglog import cloudlog
 
 EARTH_GM = 3.986005e14  # m^3/s^2 (gravitational constant * mass of earth)
 
@@ -240,6 +241,7 @@ class LiveKalman():
 
     # Should not continue if the quats behave this weirdly
     if not (0.1 < quat_norm < 10):
+      cloudlog.error("Kalman filter quaternions unstable")
       raise KalmanError
 
     self.filter.x[States.ECEF_ORIENTATION, 0] = self.filter.x[States.ECEF_ORIENTATION, 0] / quat_norm

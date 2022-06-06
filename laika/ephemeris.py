@@ -1,6 +1,3 @@
-from abc import ABC, abstractmethod
-from typing import Dict, List, Optional
-
 import numpy as np
 from datetime import datetime
 from math import sin, cos, sqrt, fabs, atan2
@@ -18,22 +15,12 @@ def read4(f, rinex_ver):
   return float(line[4:23]), float(line[23:42]), float(line[42:61]), float(line[61:80])
 
 
-def convert_ublox_ephem(ublox_ephem, current_time: Optional[datetime] = None):
-  # Week time of ephemeris gps msg has a roll-over period of 10 bits (19.6 years)
-  # The latest roll-over was on 2019-04-07
-  week = ublox_ephem.gpsWeek
-  if current_time is None:
-    # Each message is incremented to be greater or equal than week 1877 (2015-12-27).
-    #  To skip this use the current_time argument
-    week += 1024
-    if week < 1877:
-      week += 1024
-  else:
-    roll_overs = GPSTime.from_datetime(current_time).week // 1024
-    week += (roll_overs - (week // 1024)) * 1024
-
+def convert_ublox_ephem(ublox_ephem):
   ephem = {}
-  ephem['sv_id'] = ublox_ephem.svId
+  if ublox_ephem.gpsWeek < 1024:
+    week = ublox_ephem.gpsWeek + 1024
+  else:
+    week = ublox_ephem.gpsWeek
   ephem['toe'] = GPSTime(week, ublox_ephem.toe)
   ephem['toc'] = GPSTime(week, ublox_ephem.toc)
   ephem['af0'] = ublox_ephem.af0
@@ -59,8 +46,7 @@ def convert_ublox_ephem(ublox_ephem, current_time: Optional[datetime] = None):
   ephem['omegadot'] = ublox_ephem.omegaDot
   ephem['omega0'] = ublox_ephem.omega0
 
-  epoch = ephem['toe']
-  return GPSEphemeris(ephem, epoch)
+  return ephem
 
 
 class EphemerisType:
@@ -72,39 +58,25 @@ class EphemerisType:
   QCOM_POLY = 4
 
 
-class Ephemeris(ABC):
-
-  def __init__(self, prn, data, epoch, healthy, max_time_diff):
-    self.prn = prn
-    self.data = data
-    self.epoch = epoch
-    self.healthy = healthy
-    self.max_time_diff = max_time_diff
-
+class Ephemeris:
   def valid(self, time):
-    return abs(time - self.epoch) <= self.max_time_diff
-
-  def __repr__(self):
-    time = self.epoch.as_datetime().strftime('%Y-%m-%dT%H:%M:%S.%f')
-    return f"<{self.__class__.__name__} from {self.prn} at {time}>"
-
-  def get_sat_info(self, time: GPSTime):
-    if not self.healthy:
-      return None
-    return self._get_sat_info(time)
-
-  @abstractmethod
-  def _get_sat_info(self, time):
-    pass
+    # TODO: use proper abstract base class to define members
+    return abs(time - self.epoch) <= self.max_time_diff  # pylint: disable=no-member
 
 
 class GLONASSEphemeris(Ephemeris):
   def __init__(self, data, epoch, healthy=True):
-    super().__init__(data['prn'], data, epoch, healthy, max_time_diff=25*SECS_IN_MIN)
+    self.prn = data['prn']
+    self.epoch = epoch
+    self.healthy = healthy
+    self.data = data
+    self.max_time_diff = 25*SECS_IN_MIN
     self.type = EphemerisType.NAV
     self.channel = data['freq_num']
 
-  def _get_sat_info(self, time: GPSTime):
+  def get_sat_info(self, time):
+    if not self.healthy:
+      return None
     # see the russian doc for this:
     # http://gauss.gge.unb.ca/GLONASS.ICD.pdf
 
@@ -168,11 +140,17 @@ class GLONASSEphemeris(Ephemeris):
 
 class PolyEphemeris(Ephemeris):
   def __init__(self, prn, data, epoch, healthy=True, eph_type=None, tgd=0):
-    super().__init__(prn, data, epoch, healthy, max_time_diff=SECS_IN_HR)
+    self.prn = prn
+    self.epoch = epoch
+    self.healthy = healthy
+    self.data = data
     self.tgd = tgd
+    self.max_time_diff = SECS_IN_HR
     self.type = eph_type
 
-  def _get_sat_info(self, time: GPSTime):
+  def get_sat_info(self, time):
+    if not self.healthy:
+      return None
     dt = time - self.data['t0']
     deg = self.data['deg']
     deg_t = self.data['deg_t']
@@ -190,14 +168,20 @@ class PolyEphemeris(Ephemeris):
 
 class GPSEphemeris(Ephemeris):
   def __init__(self, data, epoch, healthy=True):
-    super().__init__('G%02i' % data['sv_id'], data, epoch, healthy, max_time_diff=2*SECS_IN_HR)
+    self.prn = 'G%02i' % data['prn']
+    self.epoch = epoch
+    self.healthy = healthy
+    self.data = data
+    self.max_time_diff = 2*SECS_IN_HR
     self.max_time_diff_tgd = SECS_IN_DAY
     self.type = EphemerisType.NAV
 
   def get_tgd(self):
     return self.data['tgd']
 
-  def _get_sat_info(self, time: GPSTime):
+  def get_sat_info(self, time):
+    if not self.healthy:
+      return None
     eph = self.data
     tdiff = time - eph['toc']  # Time of clock
     clock_err = eph['af0'] + tdiff * (eph['af1'] + tdiff * eph['af2'])
@@ -278,9 +262,9 @@ class GPSEphemeris(Ephemeris):
     return pos, vel, clock_err, clock_rate_err
 
 
-def parse_sp3_orbits(file_names, SUPPORTED_CONSTELLATIONS) -> List[PolyEphemeris]:
+def parse_sp3_orbits(file_names, SUPPORTED_CONSTELLATIONS):
   ephems = []
-  data: Dict[str, List] = {}
+  data = {}
   for file_name in file_names:
     f = open(file_name)
     while True:
@@ -298,7 +282,7 @@ def parse_sp3_orbits(file_names, SUPPORTED_CONSTELLATIONS) -> List[PolyEphemeris
         epoch = GPSTime.from_datetime(datetime(year, month, day, hour, minute, second))
       # pos line
       elif line[0] == 'P':
-        prn = line[1:4].replace(' ', '0')
+        prn = line[1:4].replace(' ','0')
         # In old SP3 files vehicle ID doesn't contain constellation
         # identifier. We assume that constellation is GPS when missing.
         if prn[0] == '0':
@@ -320,35 +304,30 @@ def parse_sp3_orbits(file_names, SUPPORTED_CONSTELLATIONS) -> List[PolyEphemeris
   deg = 16
   deg_t = 1
   for prn in data:
-    ephems.extend(read_prn_data(data, prn, deg, deg_t))
-  return ephems
-
-
-def read_prn_data(data, prn, deg, deg_t):
-  ephems = []
-  # TODO Handle this properly
-  np_data_prn = np.array(data[prn])
-  # Currently, don't even bother with satellites that have unhealthy times
-  if (np_data_prn[:, 4] > .99).any():
-    return []
-  for i in range(len(np_data_prn) - deg):
-    epoch = np_data_prn[i + deg // 2][0]
-    measurements = np_data_prn[i:i + deg + 1, :4]
-
-    times = (measurements[:, 0] - epoch).astype(float)
-    if (np.diff(times) != 900).any():
+    # TODO Handle this properly
+    # Currently don't even bother with satellites that have unhealthy times
+    if (np.array(data[prn])[:,4] > .99).any():
       continue
-    x, y, z = measurements[:, 1:].astype(float).transpose()
-
-    poly_data = {}
-    poly_data['t0'] = epoch
-    poly_data['x'] = np.polyfit(times, x, deg)
-    poly_data['y'] = np.polyfit(times, y, deg)
-    poly_data['z'] = np.polyfit(times, z, deg)
-    poly_data['clock'] = [(data[prn][i + deg // 2 + 1][4] - data[prn][i + deg // 2 - 1][4]) / 1800, data[prn][i + deg // 2][4]]
-    poly_data['deg'] = deg
-    poly_data['deg_t'] = deg_t
-    ephems.append(PolyEphemeris(prn, poly_data, epoch, healthy=True, eph_type=EphemerisType.RAPID_ORBIT))
+    for i in range(len(data[prn]) - deg):
+      times, x, y, z, clock = [],[],[],[],[]
+      epoch = data[prn][i + deg//2][0]
+      for j in range(deg + 1):
+        times.append(data[prn][i + j][0] - epoch)
+        x.append(data[prn][i + j][1])
+        y.append(data[prn][i + j][2])
+        z.append(data[prn][i + j][3])
+        clock.append(data[prn][i + j][4])
+      if (np.diff(times) != 900).any():
+        continue
+      poly_data = {}
+      poly_data['t0'] = epoch
+      poly_data['x'] = np.polyfit(times, x, deg)
+      poly_data['y'] = np.polyfit(times, y, deg)
+      poly_data['z'] = np.polyfit(times, z, deg)
+      poly_data['clock'] = [(data[prn][i + deg//2 + 1][4] - data[prn][i + deg//2 - 1][4])/1800, data[prn][i + deg//2][4]]
+      poly_data['deg'] = deg
+      poly_data['deg_t'] = deg_t
+      ephems.append(PolyEphemeris(prn, poly_data, epoch, healthy=True, eph_type=EphemerisType.RAPID_ORBIT))
   return ephems
 
 
@@ -384,10 +363,10 @@ def parse_rinex_nav_msg_gps(file_name):
       if line[0] != 'G':
         continue
     if rinex_ver == 3:
-      sv_id = int(line[1:3])
+      prn = int(line[1:3])
       epoch = GPSTime.from_datetime(datetime.strptime(line[4:23], "%y %m %d %H %M %S"))
     elif rinex_ver == 2:
-      sv_id = int(line[0:2])
+      prn = int(line[0:2])
       # 2000 year is in RINEX file as 0, but Python requires two digit year: 00
       epoch_str = line[3:20]
       if epoch_str[0] == ' ':
@@ -396,7 +375,7 @@ def parse_rinex_nav_msg_gps(file_name):
       line = ' ' + line  # Shift 1 char to the right
 
     line = line.replace('D', 'E')  # Handle bizarro float format
-    e = {'epoch': epoch, 'sv_id': sv_id}
+    e = {'epoch': epoch, 'prn': prn}
     e['toc'] = epoch
     e['af0'] = float(line[23:42])
     e['af1'] = float(line[42:61])
@@ -464,6 +443,15 @@ def parse_rinex_nav_msg_glonass(file_name):
 
 
 '''
+def parse_ublox_ephems(ublox_ephems):
+  ephems = []
+  for ublox_ephem in ublox_ephems:
+    svId = ublox_ephem.ubloxGnss.ephemeris.svId
+    data = convert_ublox_ephem(ublox_ephem.ubloxGnss.ephemeris)
+    epoch = data['toe']
+    ephems.append(GPSEphemeris(svId, data, epoch))
+  return ephems
+
 
 def parse_qcom_ephems(qcom_polys, current_week):
   ephems = []

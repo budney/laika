@@ -1,6 +1,6 @@
 import numpy as np
 from numpy import dot, inner, array, linalg
-from .coordinates import LocalCoord
+from kalman.helpers.coordinates import LocalCoord
 
 
 '''
@@ -19,16 +19,14 @@ def euler2quat(eulers):
   eulers = np.atleast_2d(eulers)
   gamma, theta, psi = eulers[:,0],  eulers[:,1],  eulers[:,2]
 
-  cos_half_gamma = np.cos(gamma / 2)
-  cos_half_theta = np.cos(theta / 2)
-  cos_half_psi = np.cos(psi / 2)
-  sin_half_gamma = np.sin(gamma / 2)
-  sin_half_theta = np.sin(theta / 2)
-  sin_half_psi = np.sin(psi / 2)
-  q0 = cos_half_gamma * cos_half_theta * cos_half_psi + sin_half_gamma * sin_half_theta * sin_half_psi
-  q1 = sin_half_gamma * cos_half_theta * cos_half_psi - cos_half_gamma * sin_half_theta * sin_half_psi
-  q2 = cos_half_gamma * sin_half_theta * cos_half_psi + sin_half_gamma * cos_half_theta * sin_half_psi
-  q3 = cos_half_gamma * cos_half_theta * sin_half_psi - sin_half_gamma * sin_half_theta * cos_half_psi
+  q0 = np.cos(gamma / 2) * np.cos(theta / 2) * np.cos(psi / 2) + \
+       np.sin(gamma / 2) * np.sin(theta / 2) * np.sin(psi / 2)
+  q1 = np.sin(gamma / 2) * np.cos(theta / 2) * np.cos(psi / 2) - \
+       np.cos(gamma / 2) * np.sin(theta / 2) * np.sin(psi / 2)
+  q2 = np.cos(gamma / 2) * np.sin(theta / 2) * np.cos(psi / 2) + \
+       np.sin(gamma / 2) * np.cos(theta / 2) * np.sin(psi / 2)
+  q3 = np.cos(gamma / 2) * np.cos(theta / 2) * np.sin(psi / 2) - \
+       np.sin(gamma / 2) * np.sin(theta / 2) * np.cos(psi / 2)
 
   quats = array([q0, q1, q2, q3]).T
   for i in range(len(quats)):
@@ -75,7 +73,8 @@ def quat2rot(quats):
 
   if len(input_shape) < 2:
     return Rs[0]
-  return Rs
+  else:
+    return Rs
 
 
 def rot2quat(rots):
@@ -110,7 +109,8 @@ def rot2quat(rots):
 
   if len(input_shape) < 3:
     return q[0]
-  return q
+  else:
+    return q
 
 
 def euler2rot(eulers):
@@ -130,6 +130,10 @@ euler_from_rot = rot2euler
 euler_from_quat = quat2euler
 rot_from_euler = euler2rot
 quat_from_euler = euler2quat
+
+
+
+
 
 
 '''
@@ -217,6 +221,8 @@ def ned_euler_from_ecef(ned_ecef_init, ecef_poses):
   ecef_poses = array(ecef_poses)
   output_shape = ecef_poses.shape
   ned_ecef_init = np.atleast_2d(ned_ecef_init)
+  if ned_ecef_init.shape[0] == 1:
+    ned_ecef_init = np.tile(ned_ecef_init[0], (output_shape[0], 1))
   ecef_poses = np.atleast_2d(ecef_poses)
 
   ned_poses = np.zeros(ecef_poses.shape)
@@ -277,7 +283,7 @@ def ecef2car(car_ecef, psi, theta, points_ecef, ned_converter):
   points_ned = np.vstack(points_ned).T
 
   # n, e, d -> x, y, z
-  # Calculate relative positions and rotate wrt to heading and pitch of car
+  # Calculate relative postions and rotate wrt to heading and pitch of car
   invert_R = array([[1., 0., 0.], [0., -1., 0.], [0., 0., -1.]])
 
   c, s = np.cos(psi), np.sin(psi)

@@ -1,76 +1,81 @@
-from enum import IntEnum
-from typing import Dict
+import warnings
 
 import numpy as np
 from .lib.coordinates import LocalCoord
 
+# From https://gpsd.gitlab.io/gpsd/NMEA.html - Satellite IDs section
+NMEA_ID_RANGES = (
+  {
+    'range': (1, 32),
+    'constellation': 'GPS'
+  },
+  {
+    'range': (33, 54),
+    'constellation': 'SBAS'
+  },
+  {
+    'range': (55, 64),
+    'constellation': 'SBAS'
+  },
+  {
+    'range': (65, 88),
+    'constellation': 'GLONASS'
+  },
+  {
+    'range': (89, 96),
+    'constellation': 'GLONASS'
+  },
+  {
+    'range': (120, 151),
+    'constellation': 'SBAS'
+  },
+  {
+    'range': (152, 158),
+    'constellation': 'SBAS'
+  },
+  {
+    'range': (173, 182),
+    'constellation': 'IMES'
+  },
+  {
+    'range': (193, 197),
+    'constellation': 'QZNSS'
+  },
+  {
+    'range': (198, 200),
+    'constellation': 'QZNSS'
+  },
+  {
+    'range': (201, 235),
+    'constellation': 'BEIDOU'
+  },
+  {
+    'range': (301, 336),
+    'constellation': 'GALILEO'
+  },
+  {
+    'range': (401, 437),
+    'constellation': 'BEIDOU'
+  }
+)
 
-class ConstellationId(IntEnum):
-  # Int values match Ublox gnssid version 8
-  GPS = 0
-  SBAS = 1
-  GALILEO = 2
-  BEIDOU = 3
-  IMES = 4
-  QZNSS = 5
-  GLONASS = 6
-  # Not supported by Ublox:
-  IRNSS = 7
-
-  def to_rinex_char(self) -> str:
-    # returns single character id
-    return RINEX_CONSTELLATION_TO_ID[self]
-
-  @classmethod
-  def from_rinex_char(cls, c: str):
-    if c in RINEX_ID_TO_CONSTELLATION:
-      return RINEX_ID_TO_CONSTELLATION[c]
-    else:
-      return None
-
-  @classmethod
-  def from_qcom_source(cls, report_source: int):
-    if report_source == 0:
-      return ConstellationId.GPS
-    if report_source == 6:
-      return ConstellationId.SBAS
-    elif report_source == 1:
-      return ConstellationId.GLONASS
-    raise NotImplementedError('Only GPS (0), SBAS (1) and GLONASS (6) are supported from qcom, not:', {report_source})
-
-
-# From https://gpsd.gitlab.io/gpsd/NMEA.html#_satellite_ids
-# NmeaId is the unique 3 digits id for every satellite globally. (Example: 001, 201)
-# SvId is the 2 digits satellite id that is unique within a constellation. (Get the unique satellite with the constellation id. Examples: G01, R01)
-CONSTELLATION_TO_NMEA_RANGES = {
-  # NmeaId ranges for each constellation with its svId offset.
-  # constellation: [(start, end, svIdOffset)]
-  # svId = nmeaId + offset
-  ConstellationId.GPS: [(1, 32, 0)],  # svId [1,32]
-  ConstellationId.SBAS: [(33, 64, -32), (120, 158, -87)],  # svId [1,71]
-  ConstellationId.GLONASS: [(65, 96, -64)],  # svId [1,31]
-  ConstellationId.IMES: [(173, 182, -172)],  # svId [1,9]
-  ConstellationId.QZNSS: [(193, 200, -192)],  # svId [1,28]  # todo should be QZSS
-  ConstellationId.BEIDOU: [(201, 235, -200), (401, 437, -365)],  # svId 1-72
-  ConstellationId.GALILEO: [(301, 336, -300)]  # svId 1-36
+# Source: RINEX 3.04
+RINEX_CONSTELLATION_IDENTIFIERS = {
+  'GPS': 'G',
+  'GLONASS': 'R',
+  'SBAS': 'S',
+  'GALILEO': 'E',
+  'BEIDOU': 'C',
+  'QZNSS': 'J',
+  'IRNSS': 'I'
 }
-#
-# # Source: RINEX 3.04
-RINEX_CONSTELLATION_TO_ID: Dict[ConstellationId, str] = {
-  ConstellationId.GPS: 'G',
-  ConstellationId.GLONASS: 'R',
-  ConstellationId.SBAS: 'S',
-  ConstellationId.GALILEO: 'E',
-  ConstellationId.BEIDOU: 'C',
-  ConstellationId.QZNSS: 'J',
-  ConstellationId.IRNSS: 'I'
-}
-
 # Make above dictionary bidirectional map:
 # Now you can ask for constellation using:
 # >>> RINEX_CONSTELLATION_IDENTIFIERS['R']
 #     "GLONASS"
-RINEX_ID_TO_CONSTELLATION: Dict[str, ConstellationId] = {id: con for con, id in RINEX_CONSTELLATION_TO_ID.items()}
+RINEX_CONSTELLATION_IDENTIFIERS.update(
+  dict([reversed(i) for i in RINEX_CONSTELLATION_IDENTIFIERS.items()])  # type: ignore
+)
 
 
 def get_el_az(pos, sat_pos):
@@ -78,7 +83,7 @@ def get_el_az(pos, sat_pos):
   sat_ned = converter.ecef2ned(sat_pos)
   sat_range = np.linalg.norm(sat_ned)
 
-  el = np.arcsin(-sat_ned[2] / sat_range)  # pylint: disable=unsubscriptable-object
+  el = np.arcsin(-sat_ned[2]/sat_range)  # pylint: disable=unsubscriptable-object
   az = np.arctan2(sat_ned[1], sat_ned[0])  # pylint: disable=unsubscriptable-object
   return el, az
 
@@ -96,46 +101,83 @@ def get_closest(time, candidates, recv_pos=None):
   )
 
 
-def get_constellation(prn: str):
+def get_constellation(prn):
   identifier = prn[0]
-  constellation = ConstellationId.from_rinex_char(identifier)
-  if constellation is not None:
-    return constellation.name
+
+  if identifier in RINEX_CONSTELLATION_IDENTIFIERS:
+    return RINEX_CONSTELLATION_IDENTIFIERS[identifier]
+  warnings.warn(f"Unknown constellation for PRN {prn}")
   return None
 
 
-def get_constellation_and_sv_id(nmea_id):
-  for c, ranges in CONSTELLATION_TO_NMEA_RANGES.items():
-    for (start, end, sv_id_offset) in ranges:
-      if start <= nmea_id <= end:
-        sv_id = nmea_id + sv_id_offset
-        return c, sv_id
-
-  raise ValueError(f"constellation not found for nmeaid {nmea_id}")
+def get_unknown_prn_from_nmea_id(nmea_id):
+  return "?%d" % nmea_id
 
 
-def get_prn_from_nmea_id(nmea_id: int):
-  c_id, sv_id = get_constellation_and_sv_id(nmea_id)
-  return "%s%02d" % (c_id.to_rinex_char(), sv_id)
+def get_nmea_id_from_unknown_prn(prn):
+  return int(prn[1:])
 
 
-def get_nmea_id_from_prn(prn: str):
-  constellation = get_constellation(prn)
-  if constellation is None:
-    raise ValueError(f"Constellation not found for prn {prn}")
-
-  sv_id = int(prn[1:])  # satellite id
-  return get_nmea_id_from_constellation_and_svid(ConstellationId[constellation], sv_id)
+def is_unknown_prn(prn):
+  return prn[0] == '?'
 
 
-def get_nmea_id_from_constellation_and_svid(constellation: ConstellationId, sv_id: int):
-  ranges = CONSTELLATION_TO_NMEA_RANGES[constellation]
-  for (start, end, sv_id_offset) in ranges:
-    new_nmea_id = sv_id - sv_id_offset
-    if start <= new_nmea_id <= end:
-      return new_nmea_id
+def get_prn_from_nmea_id(nmea_id):
+  constellation_offsets = {}
 
-  raise ValueError(f"NMEA ID not found for constellation {constellation.name} with satellite id {sv_id}")
+  for entry in NMEA_ID_RANGES:
+    start, end = entry['range']
+    constellation = entry['constellation']
+
+    if nmea_id < start:
+      warnings.warn("RINEX PRN for nmea id %i not known" % nmea_id)
+      return get_unknown_prn_from_nmea_id(nmea_id)
+
+    constellation_offset = constellation_offsets.get(constellation, 0)
+
+    if nmea_id <= end:
+      if constellation is None:
+        warnings.warn("Constellation for nmea id "
+                      "%i not known" % nmea_id)
+        return get_unknown_prn_from_nmea_id(nmea_id)
+
+      identifier = RINEX_CONSTELLATION_IDENTIFIERS.get(constellation)
+      if identifier is None:
+        warnings.warn("RINEX3 constellation identifier for "
+                      "constellation %s is not known" % constellation)
+        return get_unknown_prn_from_nmea_id(nmea_id)
+
+      number = nmea_id - start + 1 + constellation_offset
+      return "%s%02d" % (identifier, number)
+    else:
+      range_width = end - start + 1
+      constellation_offsets[constellation] = constellation_offset + range_width
+
+  warnings.warn("RINEX PRN for nmea id %i not known" % nmea_id)
+  return get_unknown_prn_from_nmea_id(nmea_id)
+
+
+def get_nmea_id_from_prn(prn):
+  if is_unknown_prn(prn):
+    return get_nmea_id_from_unknown_prn(prn)
+
+  prn_constellation = get_constellation(prn)
+  satellite_id = int(prn[1:])
+  if satellite_id < 1:
+    raise ValueError("PRN must contains number greater then 0")
+  constellation_offset = 0
+  for entry in NMEA_ID_RANGES:
+    start, end = entry['range']
+    constellation = entry['constellation']
+    if constellation != prn_constellation:
+      continue
+    range_width = end - start + 1
+    index_in_range = satellite_id - constellation_offset - 1
+    if range_width > index_in_range:
+      return start + index_in_range
+    else:
+      constellation_offset += range_width
+  raise NotImplementedError(f"NMEA ID not found for PRN {prn}")
 
 
 def rinex3_obs_from_rinex2_obs(observable):
@@ -148,7 +190,6 @@ def rinex3_obs_from_rinex2_obs(observable):
 
 class TimeRangeHolder:
   '''Class to support test if date is in any of the multiple, sparse ranges'''
-
   def __init__(self):
     # Sorted list
     self._ranges = []
